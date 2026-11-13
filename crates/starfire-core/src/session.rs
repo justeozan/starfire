@@ -36,6 +36,31 @@ impl Session {
     }
 }
 
+/// How long [`pair`] waits for each `/pair` answer — including the first, which
+/// the host holds open until someone types the PIN. Callers that show the PIN to
+/// a person should use [`pair_and_save`] with a wait measured in minutes.
+pub const DEFAULT_PAIRING_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A pairing that outlives the process: the identity whose certificate the host
+/// now trusts, and the host certificate pinned during pairing. Keep both (the
+/// key is a secret) and hand them to [`resume`] to skip the PIN next time.
+#[derive(Clone)]
+pub struct SavedPairing {
+    pub identity: crate::pairing::ClientIdentity,
+    /// The host's certificate, PEM, exactly as `getservercert` returned it.
+    pub host_cert_pem: Vec<u8>,
+}
+
+impl std::fmt::Debug for SavedPairing {
+    // The private key never reaches a log line.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SavedPairing")
+            .field("unique_id", &self.identity.unique_id)
+            .field("device_name", &self.identity.device_name)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Run the pairing ladder against `host` and return an authenticated client.
 /// **Blocks until the PIN is entered on the host** (out of band) — callers that
 /// auto-submit the PIN (e.g. via the host's web API) should do so concurrently
@@ -45,6 +70,17 @@ pub fn pair(
     device_name: &str,
     pin: &str,
 ) -> crate::Result<crate::launch::PairedClient> {
+    pair_and_save(host, device_name, pin, DEFAULT_PAIRING_WAIT).map(|(client, _)| client)
+}
+
+/// [`pair`], with a fresh identity, waiting up to `pin_wait` for each step, and
+/// returning the [`SavedPairing`] that lets [`resume`] reconnect without a PIN.
+pub fn pair_and_save(
+    host: &str,
+    device_name: &str,
+    pin: &str,
+    pin_wait: std::time::Duration,
+) -> crate::Result<(crate::launch::PairedClient, SavedPairing)> {
     use crate::https::{cert_pem_to_der, HttpsClient};
     use crate::launch::PairedClient;
     use crate::pairing::{ClientIdentity, PairingClient};
@@ -54,13 +90,36 @@ pub fn pair(
     let mut salt = [0u8; 16];
     getrandom::getrandom(&mut salt).map_err(|e| crate::Error::Protocol(format!("rng: {e}")))?;
 
-    let pairing = PairingClient::new(host, 47989, id);
+    let mut pairing = PairingClient::new(host, 47989, id);
+    pairing.timeout = pin_wait;
     let host_pem = pairing.pair(&salt, pin)?; // blocks on the host-side PIN entry
     let der = cert_pem_to_der(&host_pem)?;
     let https = HttpsClient::new(&cert, &key, Some(der))?;
     pairing.pair_challenge(&https, 47984)?;
     let uid = pairing.identity.unique_id.clone();
-    Ok(PairedClient::new(https, host, 47984, &uid))
+    let saved = SavedPairing {
+        identity: pairing.identity,
+        host_cert_pem: host_pem,
+    };
+    Ok((PairedClient::new(https, host, 47984, &uid), saved))
+}
+
+/// Reconnect to a host this client already paired with: no PIN, no ladder, the
+/// host certificate pinned from [`SavedPairing`]. A host that has since removed
+/// the client answers its requests with an error, which is how the caller learns
+/// to pair again.
+pub fn resume(host: &str, saved: &SavedPairing) -> crate::Result<crate::launch::PairedClient> {
+    use crate::https::{cert_pem_to_der, HttpsClient};
+    use crate::launch::PairedClient;
+
+    let der = cert_pem_to_der(&saved.host_cert_pem)?;
+    let https = HttpsClient::new(&saved.identity.cert_pem, &saved.identity.key_pem, Some(der))?;
+    Ok(PairedClient::new(
+        https,
+        host,
+        47984,
+        &saved.identity.unique_id,
+    ))
 }
 
 /// What a running [`StreamSession`] delivers to its consumer. Media datagrams

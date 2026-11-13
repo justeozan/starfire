@@ -75,6 +75,7 @@ fn config_from_env() -> Result<StarfireConfig, String> {
     Ok(StarfireConfig {
         host: env("STARFIRE_HOST").ok_or("STARFIRE_HOST not set")?,
         pin: env("STARFIRE_PIN").unwrap_or(d.pin),
+        pairing: None,
         device_name: d.device_name,
         app_name: env("STARFIRE_APP").unwrap_or(d.app_name),
         width: env_u32("STARFIRE_W", d.width),

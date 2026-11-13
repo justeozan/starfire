@@ -64,7 +64,7 @@ impl PairingClient {
              &phrase=getservercert&salt={salt}&clientcert={cert}",
             uid = self.identity.unique_id,
             uuid = self.identity.unique_id,
-            name = self.identity.device_name,
+            name = percent_encode(&self.identity.device_name),
             salt = hex::encode(salt),
             cert = hex::encode(self.identity.cert_pem.as_bytes()),
         );
@@ -207,6 +207,22 @@ impl PairingClient {
     }
 }
 
+/// Percent-encode a value for a query string: every byte outside RFC 3986's
+/// unreserved set becomes `%XX`. A device name is the one free-text field in the
+/// ladder, and a raw space in it ends the request line early — Sunshine then
+/// closes the connection without a response.
+pub fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 /// Parse a `/pair` response envelope, hex-decoding the binary fields.
 pub fn parse_pair_response(xml: &[u8]) -> crate::Result<PairResponse> {
     let f = crate::xml::parse_flat(xml)?;
@@ -234,6 +250,15 @@ pub fn parse_pair_response(xml: &[u8]) -> crate::Result<PairResponse> {
 mod tests {
     use super::*;
     use crate::pairing::crypto::random_bytes;
+
+    #[test]
+    fn device_names_are_percent_encoded_for_the_query() {
+        assert_eq!(percent_encode("Starfire"), "Starfire");
+        assert_eq!(percent_encode("Orivo spike"), "Orivo%20spike");
+        assert_eq!(percent_encode("Pixel 7/a&b=c"), "Pixel%207%2Fa%26b%3Dc");
+        assert_eq!(percent_encode("iPhone de Zoé"), "iPhone%20de%20Zo%C3%A9");
+        assert_eq!(percent_encode("a-b.c_d~e"), "a-b.c_d~e");
+    }
 
     #[test]
     fn parses_getservercert_response_shape() {

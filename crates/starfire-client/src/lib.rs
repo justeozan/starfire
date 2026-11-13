@@ -109,7 +109,11 @@ pub struct StarfireConfig {
     /// Host address the client dials (an IP the host can reach back on).
     pub host: String,
     /// Pairing PIN (entered on the host out of band; this drives the ladder).
+    /// Unused when [`pairing`](Self::pairing) is set.
     pub pin: String,
+    /// A pairing kept from an earlier run ([`session::pair_and_save`]). When set,
+    /// the session reconnects with it instead of pairing again.
+    pub pairing: Option<session::SavedPairing>,
     /// Name shown in the host's list of paired clients.
     pub device_name: String,
     /// App title to launch from the host's `/applist` (default `"Desktop"`).
@@ -144,6 +148,7 @@ impl Default for StarfireConfig {
         Self {
             host: String::new(),
             pin: "1234".to_string(),
+            pairing: None,
             device_name: "Starfire".to_string(),
             app_name: "Desktop".to_string(),
             width: 1920,
@@ -790,8 +795,11 @@ impl Pipeline {
     /// Runs until the session ends; `Err` carries the reason for the embedder.
     fn stream(&self) -> Result<(), String> {
         let cfg = &self.cfg;
-        let client = session::pair(&cfg.host, &cfg.device_name, &cfg.pin)
-            .map_err(|e| format!("pair: {e}"))?;
+        let client = match &cfg.pairing {
+            Some(saved) => session::resume(&cfg.host, saved).map_err(|e| format!("resume: {e}"))?,
+            None => session::pair(&cfg.host, &cfg.device_name, &cfg.pin)
+                .map_err(|e| format!("pair: {e}"))?,
+        };
         let apps = client.applist().map_err(|e| format!("applist: {e}"))?;
         let app = apps
             .iter()
